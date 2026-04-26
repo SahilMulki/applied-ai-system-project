@@ -48,11 +48,14 @@ class Task:
     _RECURRENCE_DELTA: dict = field(default_factory=dict, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        """Set the recurrence delta lookup after dataclass init."""
         self._RECURRENCE_DELTA = {
             Frequency.DAILY: timedelta(days=1),
             Frequency.WEEKLY: timedelta(weeks=1),
         }
+        if self.duration <= 0:
+            raise ValueError(f"Task duration must be positive, got {self.duration}.")
+        if not (1 <= self.priority <= 5):
+            raise ValueError(f"Task priority must be 1–5, got {self.priority}.")
 
     def mark_complete(self) -> None:
         """Mark this task as completed."""
@@ -75,6 +78,13 @@ class Pet:
     breed: str
     age: int
     tasks: list[Task] = field(default_factory=list)
+    health_notes: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.name.strip():
+            raise ValueError("Pet name cannot be empty.")
+        if self.age < 0:
+            raise ValueError(f"Pet age cannot be negative, got {self.age}.")
 
     def add_task(self, task: Task) -> None:
         """Append a task to this pet's task list."""
