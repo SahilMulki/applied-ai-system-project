@@ -4,7 +4,7 @@ import json
 import logging
 import uuid
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, time
 from typing import Any, Generator
 
 from dotenv import load_dotenv
@@ -13,7 +13,7 @@ load_dotenv()
 
 import anthropic
 
-from pawpal_system import Owner, Pet, Scheduler, Task, TaskType
+from pawpal_system import Frequency, Owner, Pet, Scheduler, Task, TaskType
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -95,42 +95,115 @@ def agent_run(label: str) -> Generator[str, None, None]:
 
 CARE_PLAN_SYSTEM_INSTRUCTIONS = """\
 You are a helpful pet care planning assistant integrated into PawPal+.
-Your role is to help pet owners plan their day by organizing pet care tasks intelligently.
+Your role is to help pet owners plan their day and manage their pet care schedule.
 
 When asked to plan a day:
-1. Call get_conflicts() first to check for scheduling conflicts — always mention any found.
-2. Call get_pending_tasks() to see what needs to be done.
-3. Use generate_daily_plan() with the owner's available hours (ask if not specified).
-4. Present the plan in a friendly, organized way grouped by pet, with clear priority reasoning.
+1. Call get_conflicts() first — always mention any conflicts found.
+2. Call get_pending_tasks() to see what needs doing.
+3. Use generate_daily_plan() with the owner's available hours (ask if unspecified).
+4. Present the plan grouped by pet, with clear priority reasoning.
+
+When the user asks to add, book, or schedule a task or appointment:
+- Use schedule_task() to create it immediately. The task will appear in the schedule right away.
+- Confirm what was created and tell the user to check the Schedule tab to see it.
+- For vet appointments and one-off tasks, use frequency "As Needed" and include a due_date.
 
 Guidelines:
 - Acknowledge the owner by name.
 - Flag conflicts constructively — suggest moving tasks rather than just warning.
-- If tasks were skipped due to time limits, explain why and suggest prioritization for tomorrow.
-- If all tasks fit, celebrate that briefly.
+- If tasks were skipped due to time limits, explain why.
 - Keep responses warm and concise."""
 
 HEALTH_ADVISOR_SYSTEM_INSTRUCTIONS = """\
 You are a knowledgeable pet health advisor integrated into PawPal+.
-Your role is to help owners stay on top of their pets' health by analyzing care history
-and upcoming medical needs.
+Your role is to help owners stay on top of their pets' health.
 
 When answering health questions:
 1. Use your tools to gather relevant data before answering.
 2. Check for overdue medications and vet appointments — flag these urgently.
-3. Analyze completed task history to identify patterns (e.g., declining walk frequency).
+3. Analyze completed task history to identify patterns.
 4. Provide actionable, breed- and age-appropriate health tips.
-5. Use add_health_note() to record significant observations for future reference.
+5. Use add_health_note() to record significant observations.
+
+When the user asks to schedule a medication reminder or vet appointment:
+- Use schedule_task() to create it immediately.
+- Confirm what was scheduled and tell the user to check the Schedule tab.
+- For one-off appointments, use frequency "As Needed" and include a due_date.
+- For ongoing medications, use frequency "Daily" or "Weekly" as appropriate.
 
 Guidelines:
 - Be warm, reassuring, and practical.
-- Distinguish urgently between medical concerns and general wellness tips.
-- Never diagnose — recommend vet consultations for any medical concerns.
-- Remember conversation context — build on what was discussed in prior turns.
+- Never diagnose — recommend vet consultations for medical concerns.
+- Remember prior conversation turns and build on them.
 - Keep responses focused and medically responsible."""
 
 # ---------------------------------------------------------------------------
-# Tool definitions
+# Shared tool definitions
+# ---------------------------------------------------------------------------
+
+_SCHEDULE_TASK_TOOL: dict[str, Any] = {
+    "name": "schedule_task",
+    "description": (
+        "Creates a new task and adds it directly to a pet's schedule. "
+        "Use this when the user asks to add, book, or schedule anything — "
+        "a vet appointment, medication, walk, grooming session, etc. "
+        "The task appears in the Schedule tab immediately after creation."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pet_name": {
+                "type": "string",
+                "description": "Name of the pet to assign this task to.",
+            },
+            "task_type": {
+                "type": "string",
+                "enum": ["Walk", "Feeding", "Medicine", "Grooming", "Vet Appointment"],
+                "description": "Category of the task.",
+            },
+            "description": {
+                "type": "string",
+                "description": "Human-readable task name, e.g. 'Annual checkup' or 'Flea treatment'.",
+            },
+            "duration": {
+                "type": "integer",
+                "description": "Estimated duration in minutes.",
+                "minimum": 1,
+            },
+            "priority": {
+                "type": "integer",
+                "description": "Priority from 1 (low) to 5 (high).",
+                "minimum": 1,
+                "maximum": 5,
+            },
+            "frequency": {
+                "type": "string",
+                "enum": ["Daily", "Weekly", "Monthly", "As Needed"],
+                "description": (
+                    "Recurrence pattern. Use 'As Needed' for one-off appointments. "
+                    "Use 'Daily' for ongoing medications."
+                ),
+            },
+            "preferred_hour": {
+                "type": "integer",
+                "description": "Preferred start hour (0–23). Omit if flexible.",
+                "minimum": 0,
+                "maximum": 23,
+            },
+            "due_date": {
+                "type": "string",
+                "description": (
+                    "ISO date string (YYYY-MM-DD) for when this task is due. "
+                    "Required for 'As Needed' tasks; useful for 'Weekly' tasks."
+                ),
+            },
+        },
+        "required": ["pet_name", "task_type", "description", "duration", "priority", "frequency"],
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Care Plan Agent tool definitions
 # ---------------------------------------------------------------------------
 
 CARE_PLAN_TOOLS: list[dict[str, Any]] = [
@@ -196,7 +269,12 @@ CARE_PLAN_TOOLS: list[dict[str, Any]] = [
             "required": [],
         },
     },
+    _SCHEDULE_TASK_TOOL,
 ]
+
+# ---------------------------------------------------------------------------
+# Health Advisor Agent tool definitions
+# ---------------------------------------------------------------------------
 
 HEALTH_ADVISOR_TOOLS: list[dict[str, Any]] = [
     {
@@ -271,16 +349,77 @@ HEALTH_ADVISOR_TOOLS: list[dict[str, Any]] = [
             "required": ["pet_name", "note"],
         },
     },
+    _SCHEDULE_TASK_TOOL,
 ]
+
+
+# ---------------------------------------------------------------------------
+# Shared tool implementation mixin
+# ---------------------------------------------------------------------------
+
+class _ScheduleTaskMixin:
+    """Provides _tool_schedule_task for agents that hold a Scheduler."""
+
+    _scheduler: Scheduler
+
+    def _tool_schedule_task(
+        self,
+        pet_name: str,
+        task_type: str,
+        description: str,
+        duration: int,
+        priority: int,
+        frequency: str,
+        preferred_hour: int | None = None,
+        due_date: str | None = None,
+    ) -> str:
+        pet = next(
+            (p for p in self._scheduler.owner.pets if p.name.lower() == pet_name.lower()),
+            None,
+        )
+        if pet is None:
+            return json.dumps({"error": f"Pet '{pet_name}' not found."})
+        try:
+            tt = TaskType(task_type)
+            freq = Frequency(frequency)
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+
+        ptime = time(preferred_hour, 0) if preferred_hour is not None else None
+        ddate = date.fromisoformat(due_date) if due_date else None
+
+        try:
+            task = Task(
+                task_type=tt,
+                description=description,
+                duration=duration,
+                priority=priority,
+                frequency=freq,
+                preferred_time=ptime,
+                due_date=ddate,
+            )
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+
+        self._scheduler.add_task(pet, task)
+        logger.info("Task scheduled via agent: '%s' for %s", description, pet.name)
+        return json.dumps({
+            "success": True,
+            "pet": pet.name,
+            "description": description,
+            "type": task_type,
+            "frequency": frequency,
+            "due_date": str(ddate) if ddate else None,
+        })
 
 
 # ---------------------------------------------------------------------------
 # Care Plan Agent
 # ---------------------------------------------------------------------------
 
-class CarePlanAgent:
+class CarePlanAgent(_ScheduleTaskMixin):
     """Claude-powered agent that turns a natural-language request into a
-    personalized daily care plan by calling Scheduler methods as tools.
+    personalized daily care plan, and can also create tasks on the schedule.
 
     Each call to run() is independent (stateless). Prompt caching is applied
     to the system prompt so repeated calls within 5 minutes avoid re-encoding
@@ -330,7 +469,6 @@ class CarePlanAgent:
                     text_blocks = [b.text for b in response.content if b.type == "text"]
                     return text_blocks[0] if text_blocks else ""
 
-                # tool_use path
                 messages.append({"role": "assistant", "content": response.content})
                 tool_results = []
                 for block in response.content:
@@ -351,6 +489,7 @@ class CarePlanAgent:
             "get_conflicts": self._tool_get_conflicts,
             "generate_daily_plan": self._tool_generate_daily_plan,
             "get_pet_info": self._tool_get_pet_info,
+            "schedule_task": self._tool_schedule_task,
         }
         fn = dispatch.get(tool_name)
         if fn is None:
@@ -421,6 +560,7 @@ class CarePlanAgent:
 
     def _build_system_prompt(self) -> list[dict[str, Any]]:
         owner = self._scheduler.owner
+        today = date.today()
         pet_lines = "\n".join(
             f"- {p.name}: {p.breed}, {p.age} years old, {len(p.tasks)} tasks registered"
             for p in owner.pets
@@ -429,7 +569,11 @@ class CarePlanAgent:
             {"type": "text", "text": CARE_PLAN_SYSTEM_INSTRUCTIONS},
             {
                 "type": "text",
-                "text": f"Owner: {owner.name}\n\nPets:\n{pet_lines}",
+                "text": (
+                    f"Today's date: {today.strftime('%A, %B %d, %Y')}\n"
+                    f"Owner: {owner.name}\n\n"
+                    f"Pets:\n{pet_lines}"
+                ),
                 "cache_control": {"type": "ephemeral"},
             },
         ]
@@ -439,7 +583,7 @@ class CarePlanAgent:
 # Health Advisor Agent
 # ---------------------------------------------------------------------------
 
-class HealthAdvisorAgent:
+class HealthAdvisorAgent(_ScheduleTaskMixin):
     """Multi-turn Claude agent for pet health analysis.
 
     Conversation history is maintained in self._messages between calls to
@@ -495,7 +639,6 @@ class HealthAdvisorAgent:
                     self._messages.append({"role": "assistant", "content": final_text})
                     return final_text
 
-                # tool_use path
                 self._messages.append({"role": "assistant", "content": response.content})
                 tool_results = []
                 for block in response.content:
@@ -520,6 +663,7 @@ class HealthAdvisorAgent:
             "get_medication_tasks": self._tool_get_medication_tasks,
             "get_vet_appointments": self._tool_get_vet_appointments,
             "add_health_note": self._tool_add_health_note,
+            "schedule_task": self._tool_schedule_task,
         }
         fn = dispatch.get(tool_name)
         if fn is None:
@@ -617,6 +761,7 @@ class HealthAdvisorAgent:
 
     def _build_system_prompt(self) -> list[dict[str, Any]]:
         owner = self._scheduler.owner
+        today = date.today()
         pet_lines = "\n".join(
             f"- {p.name}: {p.breed}, {p.age} years old"
             for p in owner.pets
@@ -625,7 +770,11 @@ class HealthAdvisorAgent:
             {"type": "text", "text": HEALTH_ADVISOR_SYSTEM_INSTRUCTIONS},
             {
                 "type": "text",
-                "text": f"Owner: {owner.name}\n\nPets:\n{pet_lines}",
+                "text": (
+                    f"Today's date: {today.strftime('%A, %B %d, %Y')}\n"
+                    f"Owner: {owner.name}\n\n"
+                    f"Pets:\n{pet_lines}"
+                ),
                 "cache_control": {"type": "ephemeral"},
             },
         ]

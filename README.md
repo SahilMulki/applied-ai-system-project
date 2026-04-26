@@ -1,3 +1,13 @@
+The original project was PawPal+. PawPal is a smart pet care management system to help owners take care of their pets. The app helps owners track things for their pets like feedings, walks, appointments, etc.
+
+# Title and Summary
+
+This project builds on the original PawPal+ app. I added two agents, a Care Plan Agent, and a Health Advisor Agent. The user can talk to these agents in natural language and the agents will autonomously do things like schedule an appointment or create a care plan. I also added more error logging to help to evals and testing. These new features matter because they make the app more helpful for owners.
+
+# Architecture Overview
+
+The diagram helps to show the agentic workflow of this app. You can see how when the user chats with an agent, the agent is capable of independently calling tools that provide it with the information it needs to be able to do things like schedule an appointment are create a personalized schedule. You can also see that I am using the Claude API for the agents.
+
 # PawPal+ (Module 2 Project)
 
 You are building **PawPal+**, a Streamlit app that helps a pet owner plan care tasks for their pet.

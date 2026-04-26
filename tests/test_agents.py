@@ -110,6 +110,48 @@ class TestCarePlanAgentTools:
         result = json.loads(agent._dispatch_tool("get_pet_info", {"pet_name": "Buddy"}))
         assert len(result) == 1
 
+    def test_schedule_task_creates_task_on_pet(self):
+        scheduler, pet = make_scheduler()
+        agent = CarePlanAgent(scheduler)
+        result = json.loads(agent._dispatch_tool("schedule_task", {
+            "pet_name": "Buddy",
+            "task_type": "Vet Appointment",
+            "description": "Annual checkup",
+            "duration": 60,
+            "priority": 5,
+            "frequency": "As Needed",
+            "due_date": "2026-05-10",
+        }))
+        assert result["success"] is True
+        assert any(t.description == "Annual checkup" for t in pet.tasks)
+
+    def test_schedule_task_appears_in_get_pending(self):
+        scheduler, pet = make_scheduler()
+        agent = CarePlanAgent(scheduler)
+        agent._dispatch_tool("schedule_task", {
+            "pet_name": "Buddy",
+            "task_type": "Medicine",
+            "description": "Heartworm pill",
+            "duration": 5,
+            "priority": 5,
+            "frequency": "Daily",
+        })
+        pending = json.loads(agent._dispatch_tool("get_pending_tasks", {}))
+        assert any(t["description"] == "Heartworm pill" for t in pending)
+
+    def test_schedule_task_unknown_pet_returns_error(self):
+        scheduler, _ = make_scheduler()
+        agent = CarePlanAgent(scheduler)
+        result = json.loads(agent._dispatch_tool("schedule_task", {
+            "pet_name": "Ghost",
+            "task_type": "Walk",
+            "description": "Evening walk",
+            "duration": 30,
+            "priority": 3,
+            "frequency": "Daily",
+        }))
+        assert "error" in result
+
     def test_unknown_tool_returns_error(self):
         scheduler, _ = make_scheduler()
         agent = CarePlanAgent(scheduler)
@@ -212,6 +254,21 @@ class TestHealthAdvisorAgentTools:
         agent = HealthAdvisorAgent(scheduler)
         result = json.loads(agent._dispatch_tool("get_vet_appointments", {}))
         assert result[0]["overdue"] is True
+
+    def test_schedule_task_creates_vet_appointment(self):
+        scheduler, pet = make_scheduler()
+        agent = HealthAdvisorAgent(scheduler)
+        result = json.loads(agent._dispatch_tool("schedule_task", {
+            "pet_name": "Buddy",
+            "task_type": "Vet Appointment",
+            "description": "Dental cleaning",
+            "duration": 90,
+            "priority": 4,
+            "frequency": "As Needed",
+            "due_date": "2026-06-01",
+        }))
+        assert result["success"] is True
+        assert any(t.description == "Dental cleaning" for t in pet.tasks)
 
     def test_reset_conversation_clears_history(self):
         scheduler, _ = make_scheduler()

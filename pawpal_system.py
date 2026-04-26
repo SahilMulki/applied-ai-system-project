@@ -269,8 +269,21 @@ class Scheduler:
         """Build a DailyPlan by fitting highest-priority tasks into the owner's free time."""
         free_minutes = self._free_minutes(available_hours)
 
+        def _relevant(task: Task) -> bool:
+            if task.completed:
+                return False
+            if task.frequency == Frequency.DAILY:
+                return True
+            if task.frequency == Frequency.WEEKLY:
+                anchor = task.due_date if task.due_date else target_date
+                return target_date.weekday() == anchor.weekday()
+            if task.frequency == Frequency.MONTHLY:
+                return task.due_date is not None and task.due_date.day == target_date.day
+            # AS_NEEDED
+            return task.due_date == target_date if task.due_date else False
+
         pending = sorted(
-            [t for t in self.tasks if not t.completed],
+            [t for t in self.tasks if _relevant(t)],
             key=lambda t: t.priority,
             reverse=True,
         )
