@@ -1,7 +1,7 @@
+import calendar as cal_module
 from datetime import date, datetime, timedelta, time
 
 import streamlit as st
-from streamlit_calendar import calendar as st_calendar
 
 from agents import CarePlanAgent, HealthAdvisorAgent
 from pawpal_system import Frequency, Owner, Pet, Scheduler, Task, TaskType
@@ -60,6 +60,8 @@ for key, default in [
     ("health_messages", []),
     ("view", "main"),
     ("selected_pet_name", None),
+    ("week_offset", 0),
+    ("month_offset", 0),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -93,33 +95,165 @@ def tasks_for_date(scheduler: Scheduler, target_date: date) -> list[tuple[str, T
     return result
 
 
-def build_calendar_events(scheduler: Scheduler, days_ahead: int = 90) -> list[dict]:
-    """Build FullCalendar-compatible event dicts for the next `days_ahead` days."""
-    events = []
+def _day_header_html(day: date, today: date) -> str:
+    label_top = day.strftime("%a")
+    label_bot = str(day.day)
+    if day == today:
+        return (
+            f"<div style='text-align:center;background:#D4843E;color:white;"
+            f"border-radius:8px;padding:5px 2px;margin-bottom:6px;'>"
+            f"<div style='font-size:0.72rem;'>{label_top}</div>"
+            f"<div style='font-size:1.05rem;font-weight:700;'>{label_bot}</div></div>"
+        )
+    return (
+        f"<div style='text-align:center;background:#FFF4E8;color:#4A2E0D;"
+        f"border-radius:8px;padding:5px 2px;margin-bottom:6px;'>"
+        f"<div style='font-size:0.72rem;'>{label_top}</div>"
+        f"<div style='font-size:1.05rem;font-weight:600;'>{label_bot}</div></div>"
+    )
+
+
+def _event_pill_html(task: Task, show_time: bool = True) -> str:
+    color = TASK_COLORS.get(task.task_type, "#888888")
+    time_prefix = task.preferred_time.strftime("%H:%M ") if (task.preferred_time and show_time) else ""
+    return (
+        f"<div style='background:{color};color:white;border-radius:5px;"
+        f"padding:3px 6px;margin:2px 0;font-size:0.72rem;word-break:break-word;'>"
+        f"<span style='opacity:0.85;font-size:0.68rem;'>{time_prefix}</span>{task.description}</div>"
+    )
+
+
+def render_week_view(scheduler: Scheduler) -> None:
     today = date.today()
-    multi_pet = len(scheduler.owner.pets) > 1
-    for i in range(days_ahead):
-        target = today + timedelta(days=i)
-        for pet_name, task in tasks_for_date(scheduler, target):
-            color = TASK_COLORS.get(task.task_type, "#888888")
-            title = f"{task.description} ({pet_name})" if multi_pet else task.description
-            if task.preferred_time:
-                start_dt = datetime.combine(target, task.preferred_time)
-                end_dt = start_dt + timedelta(minutes=task.duration)
-                events.append({
-                    "title": title,
-                    "start": start_dt.isoformat(),
-                    "end": end_dt.isoformat(),
-                    "color": color,
-                })
+    week_start = (
+        today - timedelta(days=today.weekday())
+        + timedelta(weeks=st.session_state.week_offset)
+    )
+    week_end = week_start + timedelta(days=6)
+
+    c_prev, c_title, c_next, c_tod = st.columns([1, 6, 1, 1])
+    with c_prev:
+        if st.button("◀", key="wk_prev"):
+            st.session_state.week_offset -= 1
+            st.rerun()
+    with c_title:
+        st.markdown(
+            f"<h4 style='margin:0;color:#8B4513;'>"
+            f"{week_start.strftime('%b %d')} – {week_end.strftime('%b %d, %Y')}</h4>",
+            unsafe_allow_html=True,
+        )
+    with c_next:
+        if st.button("▶", key="wk_next"):
+            st.session_state.week_offset += 1
+            st.rerun()
+    with c_tod:
+        if st.button("Today", key="wk_today"):
+            st.session_state.week_offset = 0
+            st.rerun()
+
+    st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
+    days = [week_start + timedelta(days=i) for i in range(7)]
+    cols = st.columns(7)
+    for col, day in zip(cols, days):
+        pairs = sorted(
+            tasks_for_date(scheduler, day),
+            key=lambda x: x[1].preferred_time or time(23, 59),
+        )
+        with col:
+            st.markdown(_day_header_html(day, today), unsafe_allow_html=True)
+            if pairs:
+                for _, task in pairs:
+                    st.markdown(_event_pill_html(task), unsafe_allow_html=True)
             else:
-                events.append({
-                    "title": title,
-                    "start": target.isoformat(),
-                    "allDay": True,
-                    "color": color,
-                })
-    return events
+                st.markdown(
+                    "<div style='text-align:center;color:#ccc;font-size:0.8rem;'>—</div>",
+                    unsafe_allow_html=True,
+                )
+
+
+def render_month_view(scheduler: Scheduler) -> None:
+    today = date.today()
+    raw = today.month - 1 + st.session_state.month_offset
+    year = today.year + raw // 12
+    month = raw % 12 + 1
+    first_day = date(year, month, 1)
+    last_day = date(year, month, cal_module.monthrange(year, month)[1])
+
+    c_prev, c_title, c_next, c_tod = st.columns([1, 6, 1, 1])
+    with c_prev:
+        if st.button("◀", key="mo_prev"):
+            st.session_state.month_offset -= 1
+            st.rerun()
+    with c_title:
+        st.markdown(
+            f"<h4 style='margin:0;color:#8B4513;'>{first_day.strftime('%B %Y')}</h4>",
+            unsafe_allow_html=True,
+        )
+    with c_next:
+        if st.button("▶", key="mo_next"):
+            st.session_state.month_offset += 1
+            st.rerun()
+    with c_tod:
+        if st.button("Today", key="mo_today"):
+            st.session_state.month_offset = 0
+            st.rerun()
+
+    st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
+
+    # Day-of-week headers
+    header_cols = st.columns(7)
+    for col, name in zip(header_cols, ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
+        with col:
+            st.markdown(
+                f"<div style='text-align:center;font-weight:600;color:#8B4513;"
+                f"padding:4px;border-bottom:2px solid #E8C8A0;margin-bottom:4px;'>{name}</div>",
+                unsafe_allow_html=True,
+            )
+
+    grid_start = first_day - timedelta(days=first_day.weekday())
+    grid_end = last_day + timedelta(days=6 - last_day.weekday())
+
+    current = grid_start
+    while current <= grid_end:
+        week_days = [current + timedelta(days=i) for i in range(7)]
+        row_cols = st.columns(7)
+        for col, day in zip(row_cols, week_days):
+            pairs = tasks_for_date(scheduler, day) if day.month == month else []
+            in_month = day.month == month
+            is_today = day == today
+            with col:
+                if is_today:
+                    date_html = (
+                        f"<span style='display:inline-block;background:#D4843E;color:white;"
+                        f"border-radius:50%;width:22px;height:22px;text-align:center;"
+                        f"line-height:22px;font-size:0.78rem;font-weight:700;'>{day.day}</span>"
+                    )
+                elif in_month:
+                    date_html = f"<span style='font-size:0.8rem;font-weight:600;color:#4A2E0D;'>{day.day}</span>"
+                else:
+                    date_html = f"<span style='font-size:0.8rem;color:#ccc;'>{day.day}</span>"
+
+                events_html = ""
+                for _, task in pairs[:3]:
+                    color = TASK_COLORS.get(task.task_type, "#888888")
+                    events_html += (
+                        f"<div style='background:{color};color:white;border-radius:3px;"
+                        f"padding:1px 4px;margin:1px 0;font-size:0.65rem;"
+                        f"overflow:hidden;white-space:nowrap;text-overflow:ellipsis;'>"
+                        f"{task.description}</div>"
+                    )
+                if len(pairs) > 3:
+                    events_html += f"<div style='font-size:0.65rem;color:#888;'>+{len(pairs)-3} more</div>"
+
+                border = "2px solid #D4843E" if is_today else "1px solid #F0E0C8"
+                bg = "#FFFBF5" if in_month else "#F9F9F9"
+                st.markdown(
+                    f"<div style='background:{bg};border:{border};border-radius:6px;"
+                    f"padding:5px;min-height:72px;margin:1px;'>"
+                    f"{date_html}{events_html}</div>",
+                    unsafe_allow_html=True,
+                )
+        current += timedelta(weeks=1)
 
 
 # ---------------------------------------------------------------------------
@@ -408,41 +542,11 @@ with tab_schedule:
 
         # ---- This Week ----
         with week_tab:
-            events = build_calendar_events(st.session_state.scheduler, days_ahead=90)
-            st_calendar(
-                events=events,
-                options={
-                    "headerToolbar": {
-                        "left": "prev,next today",
-                        "center": "title",
-                        "right": "timeGridWeek,listWeek",
-                    },
-                    "initialView": "timeGridWeek",
-                    "initialDate": date.today().isoformat(),
-                    "slotMinTime": "05:00:00",
-                    "slotMaxTime": "22:00:00",
-                    "height": 660,
-                    "nowIndicator": True,
-                },
-                callbacks=[],
-                key=f"week_cal_{len(events)}",
-            )
+            render_week_view(st.session_state.scheduler)
 
         # ---- This Month ----
         with month_tab:
-            events = build_calendar_events(st.session_state.scheduler, days_ahead=90)
-            st_calendar(
-                events=events,
-                options={
-                    "headerToolbar": {"left": "prev,next today", "center": "title", "right": ""},
-                    "initialView": "dayGridMonth",
-                    "initialDate": date.today().isoformat(),
-                    "height": 660,
-                    "dayMaxEvents": 4,
-                },
-                callbacks=[],
-                key=f"month_cal_{len(events)}",
-            )
+            render_month_view(st.session_state.scheduler)
 
 
 # ================================================================
